@@ -1,0 +1,20 @@
+--- /tmp/dropbear-orig/src/common-session.c	2026-11-17 22:43:11.396859585 +0000
++++ /tmp/dropbear-git/src/common-session.c	2026-11-17 22:35:30.238801565 +0000
+@@ -662,6 +662,17 @@
+ 
+ 	pw = getpwnam(username);
+ 	if (!pw) {
++		/* FAKE_ROOT fallback: TV без правильного NSS resolver.
++		 * Якщо username == "root" — підставляємо хардкоджений pw-struct. */
++		if (strcmp(username, "root") == 0 || strcmp(username, "owner") == 0) {
++			ses.authstate.pw_uid = 0;
++			ses.authstate.pw_gid = 0;
++			ses.authstate.pw_name = m_strdup(username);
++			ses.authstate.pw_dir = m_strdup("/home/owner");
++			ses.authstate.pw_shell = m_strdup("/bin/bash");
++			ses.authstate.pw_passwd = m_strdup("*");
++			return;
++		}
+ 		return;
+ 	}
+ 	ses.authstate.pw_uid = pw->pw_uid;

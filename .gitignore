@@ -1,0 +1,12 @@
+# Do NOT commit real user keys
+authorized_keys
+dropbear_*_host_key*
+tv_spalnia_*
+*.pem
+*.key
+
+# Build artifacts
+dropbear
+dropbearkey
+*.o
+*.a
